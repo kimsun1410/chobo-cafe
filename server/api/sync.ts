@@ -1,6 +1,6 @@
 import { query } from '../utils/db'
 
-// XML에서 태그 내부 값 추출하는 간단한 헬퍼 함수
+// 간단한 XML 태그 값 추출 함수
 function getXmlValue(xml: string, tagName: string): string {
   const match = xml.match(new RegExp(`<${tagName}[^>]*>(.*?)</${tagName}>`, 's'))
   if (!match) return ''
@@ -12,17 +12,18 @@ export default defineEventHandler(async () => {
   const SYNC_WINDOW_DAYS = 7
 
   try {
-    // 네이버 카페 RSS 피드 (차단 없이 public 데이터 수집 가능)
-    const rssUrl = `https://cafe.rss.naver.com/28565043.xml`
+    // 네이버 카페 RSS 공식 URL 구조 (rss.cafe.naver.com/{CAFE_ID}.xml)
+    const rssUrl = `https://rss.cafe.naver.com/${CAFE_ID}.xml`
 
     const xmlText = await $fetch<string>(rssUrl, {
       responseType: 'text',
+      timeout: 8000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       }
     })
 
-    // RSS item 태그 단위 분리
     const items = xmlText.split('<item>').slice(1)
     const articles: Array<{ articleId: string; title: string; writer: string; createdAt: Date }> = []
 
@@ -32,8 +33,8 @@ export default defineEventHandler(async () => {
       const writer = getXmlValue(itemXml, 'author') || getXmlValue(itemXml, 'dc:creator') || '카페회원'
       const pubDateStr = getXmlValue(itemXml, 'pubDate')
 
-      // URL에서 articleId 추출 (예: /28565043/12345)
-      const idMatch = link.match(/\/(\d+)$/)
+      // URL에서 articleId 추출 (예: ArticleRead.nhn?articleid=12345 또는 /12345)
+      const idMatch = link.match(/(?:articleid=|\/)(\d+)/i)
       const articleId = idMatch ? idMatch[1] : null
 
       if (articleId && title) {
@@ -47,7 +48,7 @@ export default defineEventHandler(async () => {
     }
 
     if (articles.length === 0) {
-      return { success: false, message: 'RSS 피드에서 게시글을 읽어오지 못했습니다.' }
+      return { success: false, message: 'RSS 피드 데이터를 읽어올 수 없습니다.' }
     }
 
     // DB 저장 (Upsert)
