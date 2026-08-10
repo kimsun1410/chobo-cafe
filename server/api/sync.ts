@@ -5,26 +5,20 @@ export default defineEventHandler(async () => {
   const SYNC_WINDOW_DAYS = 7
 
   try {
-    // 네이버 모바일 카페 API Target URL
+    // 1. 빠른 우회 프록시(corsproxy.io)를 사용해 네이버 모바일 카페 JSON 요청
     const targetUrl = `https://m.cafe.naver.com/ArticleListJson.nhn?search.clubid=${CAFE_ID}&search.page=1&search.perPage=50`
-    
-    // Vercel 해외 IP 차단 우회를 위한 AllOrigins 프록시 URL
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`
 
-    const proxyResponse = await $fetch<any>(proxyUrl, {
-      timeout: 10000
+    const response = await $fetch<any>(proxyUrl, {
+      timeout: 5000, // 5초 타임아웃
+      headers: {
+        'Accept': 'application/json'
+      }
     })
 
-    if (!proxyResponse || !proxyResponse.contents) {
-      throw new Error('프록시 서버로부터 응답을 받지 못했습니다.')
-    }
-
-    // JSON 데이터 파싱
-    const rawData = typeof proxyResponse.contents === 'string' 
-      ? JSON.parse(proxyResponse.contents) 
-      : proxyResponse.contents
-
+    const rawData = typeof response === 'string' ? JSON.parse(response) : response
     const articleList = rawData?.message?.result?.articleList || rawData?.result?.articleList || []
+    
     const articles: Array<{ articleId: string; title: string; writer: string; commentCount: number; createdAt: Date }> = []
 
     for (const item of articleList) {
@@ -35,8 +29,8 @@ export default defineEventHandler(async () => {
       if (articleId && title) {
         articles.push({
           articleId: String(articleId),
-          title,
-          writer,
+          title: title,
+          writer: writer,
           commentCount: Number(item.commentCount || 0),
           createdAt: new Date(item.writeDateTimestamp || Date.now())
         })
@@ -44,10 +38,10 @@ export default defineEventHandler(async () => {
     }
 
     if (articles.length === 0) {
-      return { success: false, message: '게시글 데이터를 읽어오지 못했습니다.' }
+      return { success: false, message: '파싱할 게시글이 없습니다.' }
     }
 
-    // DB 저장 (Upsert)
+    // 2. DB 저장 (Upsert)
     for (const item of articles) {
       await query(
         `INSERT INTO articles (article_id, title, writer_nickname, comment_count, created_at)
@@ -58,14 +52,14 @@ export default defineEventHandler(async () => {
       )
     }
 
-    // 오래된 데이터 삭제
+    // 3. 동기화 기간 지난 오래된 데이터 삭제
     await query(`DELETE FROM articles WHERE created_at < NOW() - INTERVAL '${SYNC_WINDOW_DAYS} days'`)
 
     return { success: true, count: articles.length }
   } catch (error: any) {
     throw createError({
       statusCode: 500,
-      statusMessage: `Sync Failed: ${error.message}`
+      statusMessage: `Sync Error: ${error.message}`
     })
   }
 })
