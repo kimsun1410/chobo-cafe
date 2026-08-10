@@ -5,34 +5,40 @@ export default defineEventHandler(async () => {
   const SYNC_WINDOW_DAYS = 7
 
   try {
-    // 네이버 모바일 카페 JSON 데이터 엔드포인트 호출
-    const targetUrl = `https://m.cafe.naver.com/ArticleListJson.nhn?search.clubid=${CAFE_ID}&search.page=1&search.perPage=50`
+    // 최신 네이버 모바일 카페 API 엔드포인트
+    const targetUrl = `https://m.cafe.naver.com/api/cafes/${CAFE_ID}/articles?page=1&perPage=50`
 
     const response = await $fetch<any>(targetUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
         'Referer': `https://m.cafe.naver.com/ca-fe/web/cafes/${CAFE_ID}/articles`
       }
     })
 
-    // JSON 구조에서 게시글 목록 추출
-    const articleList = response?.message?.result?.articleList || []
+    // 응답 데이터 구조 추출
+    const articleList = response?.message?.result?.articleList || response?.result?.articleList || []
     const articles: Array<{ articleId: string; title: string; writer: string; commentCount: number; createdAt: Date }> = []
 
     for (const item of articleList) {
-      if (item.articleId && item.subject && item.writerNickname) {
+      const articleId = item.articleId || item.articleIdStr
+      const title = item.subject || item.title
+      const writer = item.writerNickname || item.nick
+
+      if (articleId && title && writer) {
         articles.push({
-          articleId: String(item.articleId),
-          title: item.subject,
-          writer: item.writerNickname,
+          articleId: String(articleId),
+          title: title,
+          writer: writer,
           commentCount: item.commentCount || 0,
-          createdAt: new Date(item.writeDateTimestamp) // 타임스탬프 기반 정밀 변환
+          createdAt: new Date(item.writeDateTimestamp || Date.now())
         })
       }
     }
 
     if (articles.length === 0) {
-      return { success: false, message: '수집된 게시글이 없습니다. 카페 공개 여부나 CAFE_ID를 확인하세요.' }
+      return { success: false, message: '게시글 데이터를 가져오지 못했습니다. 카페 가입 필요 여부나 ID를 확인하세요.' }
     }
 
     // DB 저장 (Upsert)
@@ -46,7 +52,7 @@ export default defineEventHandler(async () => {
       )
     }
 
-    // 지정 기간 경과한 데이터 삭제
+    // 기간 지난 데이터 삭제
     await query(`DELETE FROM articles WHERE created_at < NOW() - INTERVAL '${SYNC_WINDOW_DAYS} days'`)
 
     return { success: true, syncedCount: articles.length }
