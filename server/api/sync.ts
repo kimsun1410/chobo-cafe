@@ -1,54 +1,50 @@
 import { query } from '../utils/db'
 
-// 간단한 XML 태그 값 추출 함수
-function getXmlValue(xml: string, tagName: string): string {
-  const match = xml.match(new RegExp(`<${tagName}[^>]*>(.*?)</${tagName}>`, 's'))
-  if (!match) return ''
-  return match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim()
-}
-
 export default defineEventHandler(async () => {
   const CAFE_ID = process.env.NAVER_CAFE_ID || '28565043'
   const SYNC_WINDOW_DAYS = 7
 
   try {
-    // 네이버 카페 RSS 공식 URL 구조 (rss.cafe.naver.com/{CAFE_ID}.xml)
-    const rssUrl = `https://rss.cafe.naver.com/${CAFE_ID}.xml`
+    // 네이버 모바일 카페 API Target URL
+    const targetUrl = `https://m.cafe.naver.com/ArticleListJson.nhn?search.clubid=${CAFE_ID}&search.page=1&search.perPage=50`
+    
+    // Vercel 해외 IP 차단 우회를 위한 AllOrigins 프록시 URL
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
 
-    const xmlText = await $fetch<string>(rssUrl, {
-      responseType: 'text',
-      timeout: 8000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
+    const proxyResponse = await $fetch<any>(proxyUrl, {
+      timeout: 10000
     })
 
-    const items = xmlText.split('<item>').slice(1)
-    const articles: Array<{ articleId: string; title: string; writer: string; createdAt: Date }> = []
+    if (!proxyResponse || !proxyResponse.contents) {
+      throw new Error('프록시 서버로부터 응답을 받지 못했습니다.')
+    }
 
-    for (const itemXml of items) {
-      const link = getXmlValue(itemXml, 'link')
-      const title = getXmlValue(itemXml, 'title')
-      const writer = getXmlValue(itemXml, 'author') || getXmlValue(itemXml, 'dc:creator') || '카페회원'
-      const pubDateStr = getXmlValue(itemXml, 'pubDate')
+    // JSON 데이터 파싱
+    const rawData = typeof proxyResponse.contents === 'string' 
+      ? JSON.parse(proxyResponse.contents) 
+      : proxyResponse.contents
 
-      // URL에서 articleId 추출 (예: ArticleRead.nhn?articleid=12345 또는 /12345)
-      const idMatch = link.match(/(?:articleid=|\/)(\d+)/i)
-      const articleId = idMatch ? idMatch[1] : null
+    const articleList = rawData?.message?.result?.articleList || rawData?.result?.articleList || []
+    const articles: Array<{ articleId: string; title: string; writer: string; commentCount: number; createdAt: Date }> = []
+
+    for (const item of articleList) {
+      const articleId = item.articleId || item.articleid
+      const title = item.subject || item.title
+      const writer = item.writerNickname || item.nick || '익명'
 
       if (articleId && title) {
         articles.push({
-          articleId,
+          articleId: String(articleId),
           title,
           writer,
-          createdAt: pubDateStr ? new Date(pubDateStr) : new Date()
+          commentCount: Number(item.commentCount || 0),
+          createdAt: new Date(item.writeDateTimestamp || Date.now())
         })
       }
     }
 
     if (articles.length === 0) {
-      return { success: false, message: 'RSS 피드 데이터를 읽어올 수 없습니다.' }
+      return { success: false, message: '게시글 데이터를 읽어오지 못했습니다.' }
     }
 
     // DB 저장 (Upsert)
@@ -57,8 +53,8 @@ export default defineEventHandler(async () => {
         `INSERT INTO articles (article_id, title, writer_nickname, comment_count, created_at)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (article_id) DO UPDATE 
-         SET title = EXCLUDED.title`,
-        [item.articleId, item.title, item.writer, 0, item.createdAt]
+         SET title = EXCLUDED.title, comment_count = EXCLUDED.comment_count`,
+        [item.articleId, item.title, item.writer, item.commentCount, item.createdAt]
       )
     }
 
